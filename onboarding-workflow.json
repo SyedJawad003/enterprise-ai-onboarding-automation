@@ -1,0 +1,382 @@
+{
+  "name": "AI Onboarding Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onboarding-intake",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "node-001",
+      "name": "New Hire Form Submission",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 400],
+      "notes": "Triggered when a new hire form is submitted via Google Forms, Typeform, or HRIS webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst required = ['full_name','personal_email','job_title','department','location','manager_email','start_date','employment_type'];\nconst missing = required.filter(field => !body[field] || body[field].toString().trim() === '');\nreturn [{ json: { raw_data: body, missing_fields: missing, has_missing: missing.length > 0, received_at: new Date().toISOString() } }];"
+      },
+      "id": "node-002",
+      "name": "Validate Required Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 400],
+      "notes": "Check for required fields before sending to AI extraction"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "gpt-4o" },
+            { "name": "temperature", "value": "0" },
+            {
+              "name": "messages",
+              "value": "=[{\"role\":\"system\",\"content\":\"You are an onboarding data extraction and normalization assistant. Extract and standardize employee intake data. Return only valid JSON with no markdown formatting or code fences.\"},{\"role\":\"user\",\"content\":\"Extract and normalize the following employee intake record. Standardize dates to ISO 8601, normalize names to Title Case, expand department abbreviations, ensure employment_type is one of: full-time, part-time, contractor, intern. Set review_required to true if any required field is missing or any issue is found. Return only valid JSON.\\n\\nRaw intake data:\\n\" + JSON.stringify($json.raw_data)}]"
+            },
+            { "name": "response_format", "value": "={\"type\":\"json_object\"}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-003",
+      "name": "AI Extract and Normalize",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 400],
+      "credentials": { "httpHeaderAuth": { "id": "openai-creds", "name": "OpenAI API Key" } },
+      "notes": "Sends raw intake data to OpenAI GPT-4o for extraction, normalization, and validation"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nlet extracted;\ntry {\n  const content = response.choices[0].message.content;\n  extracted = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  extracted = { review_required: true, parse_error: e.message };\n}\nreturn [{ json: extracted }];"
+      },
+      "id": "node-004",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 400],
+      "notes": "Safely parses the JSON response from OpenAI"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "condition-complete",
+              "leftValue": "={{ $json.review_required }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-005",
+      "name": "Data Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1080, 400],
+      "notes": "Routes to manual review if AI flags incomplete or problematic data"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "baseId": "={{ $vars.AIRTABLE_BASE_ID }}",
+        "tableId": "Onboarding Records",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Full Name": "={{ $json.full_name }}",
+            "Personal Email": "={{ $json.personal_email }}",
+            "Job Title": "={{ $json.job_title }}",
+            "Department": "={{ $json.department }}",
+            "Location": "={{ $json.location }}",
+            "Manager Name": "={{ $json.manager_name }}",
+            "Manager Email": "={{ $json.manager_email }}",
+            "Employment Type": "={{ $json.employment_type }}",
+            "Start Date": "={{ $json.start_date }}",
+            "Required Systems": "={{ $json.required_systems ? $json.required_systems.join(', ') : '' }}",
+            "Status": "In Progress",
+            "Created At": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-006",
+      "name": "Create Onboarding Record",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [1300, 300],
+      "credentials": { "airtableTokenApi": { "id": "airtable-creds", "name": "Airtable API Token" } },
+      "notes": "Creates the canonical onboarding record in Airtable with status In Progress"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "gpt-4o" },
+            { "name": "temperature", "value": "0.4" },
+            {
+              "name": "messages",
+              "value": "=[{\"role\":\"system\",\"content\":\"You are a professional onboarding coordinator. Generate personalized, role-specific onboarding plans and task lists. Return only valid JSON.\"},{\"role\":\"user\",\"content\":\"Based on this employee profile, generate two things:\\n1. A personalized 30-day onboarding plan\\n2. A list of onboarding tasks with assigned team and due date offset\\n\\nReturn JSON with keys: onboarding_plan (with welcome_message, day_1, week_1_priorities, key_contacts, required_training, first_30_day_goals) and tasks (array with task_title, assigned_team, priority, due_date_offset, description).\\n\\nEmployee profile:\\n\" + JSON.stringify($json)}]"
+            },
+            { "name": "response_format", "value": "={\"type\":\"json_object\"}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-007",
+      "name": "Generate Onboarding Plan and Tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1520, 300],
+      "credentials": { "httpHeaderAuth": { "id": "openai-creds", "name": "OpenAI API Key" } },
+      "notes": "Generates a personalized 30-day onboarding plan and task list using GPT-4o"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst employeeData = $('Create Onboarding Record').first().json;\nlet planData;\ntry {\n  const content = response.choices[0].message.content;\n  planData = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  planData = { parse_error: e.message };\n}\nreturn [{ json: { employee: employeeData, onboarding_plan: planData.onboarding_plan || {}, tasks: planData.tasks || [], generated_at: new Date().toISOString() } }];"
+      },
+      "id": "node-008",
+      "name": "Parse Plan and Tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 300],
+      "notes": "Parses the AI-generated onboarding plan and task list"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "gpt-4o" },
+            { "name": "temperature", "value": "0.6" },
+            {
+              "name": "messages",
+              "value": "=[{\"role\":\"system\",\"content\":\"You are an HR communications specialist. Write professional, warm, personalized employee communications. Return only valid JSON.\"},{\"role\":\"user\",\"content\":\"Write two communications:\\n1. A welcome email to the new hire\\n2. A manager handoff brief\\n\\nReturn JSON with: welcome_email (subject, body) and manager_brief (subject, body). Use \\\\n for line breaks in body fields.\\n\\nEmployee details:\\n\" + JSON.stringify($json.employee) + \"\\n\\nOnboarding plan:\\n\" + JSON.stringify($json.onboarding_plan)}]"
+            },
+            { "name": "response_format", "value": "={\"type\":\"json_object\"}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-009",
+      "name": "Draft Communications",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1960, 300],
+      "credentials": { "httpHeaderAuth": { "id": "openai-creds", "name": "OpenAI API Key" } },
+      "notes": "Generates personalized welcome email and manager brief using GPT-4o"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst planData = $('Parse Plan and Tasks').first().json;\nlet comms;\ntry {\n  const content = response.choices[0].message.content;\n  comms = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  comms = {};\n}\nreturn [{ json: { employee: planData.employee, onboarding_plan: planData.onboarding_plan, tasks: planData.tasks, welcome_email: comms.welcome_email || { subject: 'Welcome aboard!', body: 'Welcome to the team!' }, manager_brief: comms.manager_brief || { subject: 'New hire joining your team', body: 'Please review the onboarding record.' } } }];"
+      },
+      "id": "node-010",
+      "name": "Merge All Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2180, 300],
+      "notes": "Merges employee data, plan, tasks, and drafted communications into a single object"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.employee['Personal Email'] }}",
+        "subject": "={{ $json.welcome_email.subject }}",
+        "message": "={{ $json.welcome_email.body }}",
+        "options": {}
+      },
+      "id": "node-011",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [2400, 160],
+      "credentials": { "gmailOAuth2": { "id": "gmail-creds", "name": "Gmail OAuth2" } },
+      "notes": "Sends personalized welcome email to the new hire"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.employee['Manager Email'] }}",
+        "subject": "={{ $json.manager_brief.subject }}",
+        "message": "={{ $json.manager_brief.body }}",
+        "options": {}
+      },
+      "id": "node-012",
+      "name": "Send Manager Brief",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [2400, 340],
+      "credentials": { "gmailOAuth2": { "id": "gmail-creds", "name": "Gmail OAuth2" } },
+      "notes": "Sends manager handoff brief with onboarding summary and action items"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "channel": "#hr-onboarding",
+        "text": "=:tada: New hire onboarding started!\n\n*Name:* {{ $json.employee['Full Name'] }}\n*Role:* {{ $json.employee['Job Title'] }}\n*Department:* {{ $json.employee['Department'] }}\n*Start Date:* {{ $json.employee['Start Date'] }}\n*Manager:* {{ $json.employee['Manager Name'] }}\n\nOnboarding record created in Airtable. {{ $json.tasks.length }} tasks generated and assigned.",
+        "otherOptions": {}
+      },
+      "id": "node-013",
+      "name": "Notify HR Slack Channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [2400, 520],
+      "credentials": { "slackOAuth2Api": { "id": "slack-creds", "name": "Slack OAuth2" } },
+      "notes": "Posts onboarding summary to the HR Slack channel"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "baseId": "={{ $vars.AIRTABLE_BASE_ID }}",
+        "tableId": "Onboarding Records",
+        "id": "={{ $('Create Onboarding Record').first().json.id }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "Active",
+            "Onboarding Plan": "={{ JSON.stringify($json.onboarding_plan) }}",
+            "Tasks Generated": "={{ $json.tasks.length }}",
+            "Welcome Email Sent": true,
+            "Manager Brief Sent": true,
+            "Last Updated": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-014",
+      "name": "Update Onboarding Status",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [2640, 340],
+      "credentials": { "airtableTokenApi": { "id": "airtable-creds", "name": "Airtable API Token" } },
+      "notes": "Updates the Airtable record with generated plan, task count, and communication flags"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"success\",\"message\":\"Onboarding initiated for \" + $('Merge All Data').first().json.employee['Full Name'],\"tasks_created\":$('Merge All Data').first().json.tasks.length}"
+      },
+      "id": "node-015",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2860, 340],
+      "notes": "Returns success response to the originating form trigger"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Validate Required Fields').first().json.raw_data.personal_email || 'hr@company.com' }}",
+        "subject": "Action Required: Complete Your Onboarding Form",
+        "message": "=Dear {{ $('Validate Required Fields').first().json.raw_data.full_name || 'New Team Member' }},\n\nThank you for starting your onboarding. We noticed some required information is missing from your submission.\n\nMissing fields: {{ $('Validate Required Fields').first().json.missing_fields.join(', ') }}\n\nPlease resubmit the form with the missing information so we can complete your onboarding setup before your start date.\n\nIf you have any questions, please reply to this email.\n\nBest regards,\nPeople Operations Team",
+        "options": {}
+      },
+      "id": "node-016",
+      "name": "Request Missing Info",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1300, 540],
+      "credentials": { "gmailOAuth2": { "id": "gmail-creds", "name": "Gmail OAuth2" } },
+      "notes": "Emails the candidate when required fields are missing from the form submission"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"incomplete\",\"message\":\"Missing required fields. Email sent requesting completion.\",\"missing_fields\":$('Validate Required Fields').first().json.missing_fields}"
+      },
+      "id": "node-017",
+      "name": "Respond Incomplete",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1520, 540],
+      "notes": "Returns incomplete status when required fields are missing"
+    }
+  ],
+  "connections": {
+    "New Hire Form Submission": {
+      "main": [[{ "node": "Validate Required Fields", "type": "main", "index": 0 }]]
+    },
+    "Validate Required Fields": {
+      "main": [[{ "node": "AI Extract and Normalize", "type": "main", "index": 0 }]]
+    },
+    "AI Extract and Normalize": {
+      "main": [[{ "node": "Parse AI Response", "type": "main", "index": 0 }]]
+    },
+    "Parse AI Response": {
+      "main": [[{ "node": "Data Complete?", "type": "main", "index": 0 }]]
+    },
+    "Data Complete?": {
+      "main": [
+        [{ "node": "Create Onboarding Record", "type": "main", "index": 0 }],
+        [{ "node": "Request Missing Info", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Onboarding Record": {
+      "main": [[{ "node": "Generate Onboarding Plan and Tasks", "type": "main", "index": 0 }]]
+    },
+    "Generate Onboarding Plan and Tasks": {
+      "main": [[{ "node": "Parse Plan and Tasks", "type": "main", "index": 0 }]]
+    },
+    "Parse Plan and Tasks": {
+      "main": [[{ "node": "Draft Communications", "type": "main", "index": 0 }]]
+    },
+    "Draft Communications": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 0 }]]
+    },
+    "Merge All Data": {
+      "main": [[
+        { "node": "Send Welcome Email", "type": "main", "index": 0 },
+        { "node": "Send Manager Brief", "type": "main", "index": 0 },
+        { "node": "Notify HR Slack Channel", "type": "main", "index": 0 }
+      ]]
+    },
+    "Send Welcome Email": {
+      "main": [[{ "node": "Update Onboarding Status", "type": "main", "index": 0 }]]
+    },
+    "Send Manager Brief": {
+      "main": [[{ "node": "Update Onboarding Status", "type": "main", "index": 0 }]]
+    },
+    "Notify HR Slack Channel": {
+      "main": [[{ "node": "Update Onboarding Status", "type": "main", "index": 0 }]]
+    },
+    "Update Onboarding Status": {
+      "main": [[{ "node": "Respond Success", "type": "main", "index": 0 }]]
+    },
+    "Request Missing Info": {
+      "main": [[{ "node": "Respond Incomplete", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    { "name": "onboarding" },
+    { "name": "ai-automation" },
+    { "name": "hr" }
+  ],
+  "id": "onboarding-automation-v1",
+  "meta": {
+    "description": "AI-powered enterprise onboarding automation. Receives new hire form submissions, extracts and validates data using GPT-4o, creates Airtable records, generates personalized onboarding plans and tasks, and sends automated communications to new hires, managers, and HR."
+  }
+}
